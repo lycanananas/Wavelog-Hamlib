@@ -1,33 +1,84 @@
-# cloudlog-rigctl-interface
-Connects Cloudlog to rigctld / hamlib via PHP.
-This allows you to automatically log the used frequency and mode in Cloudlog's Live QSO menu. 
+# Wavelog-Hamlib
+Connects Wavelog to `rigctld` via Python 3 and the system Hamlib bindings.
+This updates the used frequency, mode and configured TX power in Wavelog's Live QSO view.
 
-Change your parameters in config.php, 
+## Requirements
+
+Use system packages only.
+
+On Debian or Ubuntu install:
+
+```bash
+apt install python3 python3-hamlib python3-requests
 ```
-// rigctl-specific configuration 
-$rigctl_host = "127.0.0.1";
-$rigctl_port = 4532;
 
-// Cloudlog-specific parameters
-$cloudlog_url = "https://log.tbspace.de";
-$cloudlog_apikey = "p1fgZhGPbWMRaD4Iz5xm";
+On Arch Linux install:
 
-// displayed in Cloudlogs Live QSO menu
-$radio_name = "FT-991a";
+```bash
+pacman -S python hamlib python-requests
+```
 
-// minimum update interval
-$interval = 1; 
-``` 
+The Python bindings are provided by the `hamlib` package itself.
 
-If you're on Debian (or Ubuntu/similar), you can install everything that is required with: 
-`apt install php-cli php-curl`
+## Configuration
 
-Start the software by running `./rigctlCloudlogInterface.php`.
-If you've downloaded the software as a .zip file instead of cloning it directly from the Git repository, you might have to make the file executable first. This is done by running
-`chmod +x rigctlCloudlogInterface.php`.
+The Python entrypoint reads `config.py`.
 
-If you want to run it in the background without an open terminal window, you can run `screen ./rigctlCloudlogInterface.php`. (this won't work on Windows, sorry!) 
+Example `config.py`:
 
-If you prefer tmux, use `tmux new -s rigctlCloudlog ./rigctlCloudlogInterface.php`. 
+```python
+# rigctl-specific configuration
+rigctl_host = "127.0.0.1"
+rigctl_port = 4532
 
-For more information on how-to setup hamlib/rigctld have a look over at the excellent guide written for pat: https://github.com/la5nta/pat/wiki/Rig-control
+# Wavelog-specific parameters
+wavelog_url = "https://example.wavelog.com/"
+wavelog_api_key = "2137-1234-5678-9012-345678901234"
+
+# displayed in Wavelog's Live QSO menu
+radio_name = "FT-991a"
+
+# poll interval in seconds
+interval = 1
+```
+
+## Running
+
+Start the software by running:
+
+```bash
+python rigctl_cloudlog_interface.py
+```
+
+Dry-run one iteration without POSTing to Wavelog:
+
+```bash
+python rigctl_cloudlog_interface.py --once --dry-run
+```
+
+## systemd
+
+Example system service is available in `wavelog-hamlib.service`.
+It runs the bridge as user `radio` and group `radio`.
+It is configured to always restart, without systemd start-rate limiting.
+
+Example installation:
+
+```bash
+sudo cp wavelog-hamlib.service /etc/systemd/system/
+sudo chown -R radio:radio /opt/Wavelog-Hamlib
+sudo chmod 640 /opt/Wavelog-Hamlib/config.py
+sudo systemctl daemon-reload
+sudo systemctl enable --now wavelog-hamlib.service
+```
+
+Useful commands:
+
+```bash
+sudo systemctl status wavelog-hamlib.service
+sudo journalctl -u wavelog-hamlib.service -f
+sudo systemctl restart wavelog-hamlib.service
+```
+
+If the `radio` user or group already exists, skip the `useradd` step.
+If you keep the project in another path, update `WorkingDirectory`, `ExecStart`, and the `--config` path in `wavelog-hamlib.service`.
