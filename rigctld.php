@@ -11,6 +11,8 @@ class rigctldAPI
 	private $host; 
 	private $port;
 	private $socket = false; 
+	private $lastCommandFailed = false;
+	private $lastRigErrorCode = 0;
 	function __construct($host = "127.0.0.1", $port = 4532)
 	{
 		$this->host = $host; 
@@ -20,38 +22,103 @@ class rigctldAPI
 	}
 	function __destruct()
 	{
-		fclose($this->fp);
+		if (isset($this->fp) && is_resource($this->fp))
+			fclose($this->fp);
 	}
 
 	public function connect()
 	{
 		$this->fp = fsockopen($this->host, $this->port, $errno, $errstr, 5);
-		if (!$this->fp) 
+		if (!$this->fp)
+		{
+			$this->lastCommandFailed = true;
+			$this->lastRigErrorCode = 0;
 			return false; 
+		}
+
+		$this->lastCommandFailed = false;
+		$this->lastRigErrorCode = 0;
 
 		return true;
 	}
+
+	public function hasConnectionError()
+	{
+		return $this->lastCommandFailed;
+	}
+
+	private function invalidateConnection()
+	{
+		if (isset($this->fp) && is_resource($this->fp))
+			fclose($this->fp);
+
+		$this->fp = false;
+		$this->lastCommandFailed = true;
+	}
+
 	private function runCommand($command, $returnSize = 1)
 	{
 		if ($this->fp === false)
+		{
+			$this->lastCommandFailed = true;
+			$this->lastRigErrorCode = 0;
 			return false; 
+		}
 
 		if (feof($this->fp))
 		{
-			$this->fp = false;
+			$this->invalidateConnection();
+			$this->lastRigErrorCode = 0;
 			return false; 
 		}
 		
 		stream_set_timeout($this->fp, 2);
 
-		fwrite($this->fp, $command . "\n");
-		$result = "";
+		if (fwrite($this->fp, $command . "\n") === false)
+		{
+			$this->invalidateConnection();
+			$this->lastRigErrorCode = 0;
+			return false;
+		}
+
+		$result = [];
 		for ($i=0; $i < $returnSize; $i++)
 		{ 
-			$result .= trim(fgets($this->fp)) . "\n";
+			$line = fgets($this->fp);
+			if ($line === false)
+			{
+				$meta = stream_get_meta_data($this->fp);
+				if (!empty($meta['timed_out']))
+				{
+					$this->lastCommandFailed = false;
+					$this->lastRigErrorCode = 0;
+				}
+				else
+				{
+					$this->invalidateConnection();
+					$this->lastRigErrorCode = 0;
+				}
+				return false;
+			}
+
+			$line = trim($line);
+			if (preg_match('/^RPRT (-?\d+)$/', $line, $matches) === 1)
+			{
+				$this->lastCommandFailed = false;
+				$this->lastRigErrorCode = (int)$matches[1];
+				return false;
+			}
+
+			$result[] = $line;
 		}
+
+		$this->lastCommandFailed = false;
+		$this->lastRigErrorCode = 0;
 		
-		return trim($result);
+		if ($returnSize === 1)
+			return $result[0];
+
+		return implode("\n", $result);
 	}
 
 	private function normalizeFrequency($frequency)
@@ -62,18 +129,41 @@ class rigctldAPI
 		return (string)(intdiv((int)$frequency, 10) * 10);
 	}
 
+	private function isValidFrequency($frequency)
+	{
+		return is_numeric($frequency) && (float)$frequency > 0;
+	}
+
+	private function isValidMode($mode)
+	{
+		return is_string($mode) && trim($mode) !== "";
+	}
+
+	private function hasMalformedRigResponse($frequency, $mode)
+	{
+		return !$this->isValidFrequency($frequency) || !$this->isValidMode($mode);
+	}
+
 	public function getFrequencyAndMode()
 	{
-		$data = $this->runCommand("fm", 3); 
-		if ($data === false)
+		$frequency = $this->getFrequency();
+		if ($frequency === false)
 			return false; 
 
-		$data = explode("\n", $data); 
+		$mode = $this->getMode();
+		if ($mode === false)
+			return false;
+
+		if ($this->hasMalformedRigResponse($frequency, $mode['mode']))
+		{
+			$this->invalidateConnection();
+			return false;
+		}
 
 		return [
-			"frequency" => $this->normalizeFrequency($data[0]),
-			"mode" => $data[1],
-			"passband" => $data[2]
+			"frequency" => $frequency,
+			"mode" => $mode['mode'],
+			"passband" => $mode['passband']
 		];
 	}
 
@@ -96,6 +186,12 @@ class rigctldAPI
 		if ($frequency === false)
 			return false;
 
+		if (!$this->isValidFrequency($frequency))
+		{
+			$this->invalidateConnection();
+			return false;
+		}
+
 		return $this->normalizeFrequency($frequency);
 	}
 
@@ -106,6 +202,17 @@ class rigctldAPI
 			return false; 
 
 		$mode = explode("\n", $mode); 
+		if (count($mode) < 2)
+		{
+			$this->invalidateConnection();
+			return false;
+		}
+
+		if (!$this->isValidMode($mode[0]))
+		{
+			$this->invalidateConnection();
+			return false;
+		}
 
 		return [
 			"mode" => $mode[0],
@@ -128,7 +235,7 @@ class rigctldAPI
 		if ($power === false)
 			return false;
 
-		$milliwatts = $this->runCommand("\\power2mW " . $power . " " . $frequency . " " . $mode);
+		$milliwatts = $this->runCommand("2 " . $power . " " . $frequency . " " . $mode);
 		if ($milliwatts === false || !is_numeric($milliwatts))
 			return false;
 

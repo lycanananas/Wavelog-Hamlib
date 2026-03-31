@@ -16,6 +16,7 @@ $rigctl = new rigctldAPI($rigctl_host, $rigctl_port);
 $lastFrequency = false; 
 $lastMode = false; 
 $lastPower = false;
+$radioDataUnavailable = false;
 
 while (true)
 {
@@ -24,6 +25,12 @@ while (true)
 	// check if we've gotten a proper response from rigctld
 	if ($data !== false)
 	{
+		if ($radioDataUnavailable)
+		{
+			echo "Radio data available again. Resuming Cloudlog updates.\n";
+			$radioDataUnavailable = false;
+		}
+
 		// only send POST to cloudlog if the settings have changed
 		if ($lastFrequency != $data['frequency'] || $lastMode != $data['mode'] || $lastPower != $data['power'])
 		{
@@ -52,7 +59,14 @@ while (true)
 	}
 	else
 	{
-		$rigctl->connect();
+		if (!$radioDataUnavailable)
+		{
+			echo "Radio data unavailable. Skipping Cloudlog update.\n";
+			$radioDataUnavailable = true;
+		}
+
+		if ($rigctl->hasConnectionError())
+			$rigctl->connect();
 	}
 
 	sleep($interval);
