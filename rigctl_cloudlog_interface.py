@@ -31,7 +31,7 @@ RECOVERABLE_ERRORS = {
 	-Hamlib.RIG_EPOWER,
 }
 
-FORCE_SEND_INTERVAL = 60
+FORCE_SEND_INTERVAL = 5
 
 
 @dataclass(frozen=True)

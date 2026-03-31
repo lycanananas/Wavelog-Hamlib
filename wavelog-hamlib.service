@@ -9,7 +9,7 @@ Type=simple
 User=radio
 Group=radio
 WorkingDirectory=/opt/Wavelog-Hamlib
-ExecStart=/usr/bin/python /opt/Wavelog-Hamlib/rigctl_cloudlog_interface.py --config /opt/Wavelog-Hamlib/config.py
+ExecStart=/usr/bin/python /opt/Wavelog-Hamlib/rigctl_cloudlog_interface.py --config /opt/Wavelog-Hamlib/config.json
 Restart=always
 RestartSec=3
 
