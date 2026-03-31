@@ -54,6 +54,14 @@ class rigctldAPI
 		return trim($result);
 	}
 
+	private function normalizeFrequency($frequency)
+	{
+		if (!is_numeric($frequency))
+			return $frequency;
+
+		return (string)(intdiv((int)$frequency, 100) * 100);
+	}
+
 	public function getFrequencyAndMode()
 	{
 		$data = $this->runCommand("fm", 3); 
@@ -63,16 +71,32 @@ class rigctldAPI
 		$data = explode("\n", $data); 
 
 		return [
-			"frequency" => $data[0],
+			"frequency" => $this->normalizeFrequency($data[0]),
 			"mode" => $data[1],
 			"passband" => $data[2]
 		];
 	}
 
+	public function getFrequencyModeAndPower()
+	{
+		$data = $this->getFrequencyAndMode();
+		if ($data === false)
+			return false;
+
+		$power = $this->getPowerInWatts($data['frequency'], $data['mode']);
+		$data['power'] = $power === false ? '' : $power;
+
+		return $data;
+	}
+
 
 	public function getFrequency()
 	{
-		return $this->runCommand("f");
+		$frequency = $this->runCommand("f");
+		if ($frequency === false)
+			return false;
+
+		return $this->normalizeFrequency($frequency);
 	}
 
 	public function getMode()
@@ -87,5 +111,27 @@ class rigctldAPI
 			"mode" => $mode[0],
 			"passband" => $mode[1]
 		];
+	}
+
+	public function getPower()
+	{
+		$power = $this->runCommand("l RFPOWER");
+		if ($power === false || !is_numeric($power))
+			return false;
+
+		return (float)$power;
+	}
+
+	public function getPowerInWatts($frequency, $mode)
+	{
+		$power = $this->getPower();
+		if ($power === false)
+			return false;
+
+		$milliwatts = $this->runCommand("\\power2mW " . $power . " " . $frequency . " " . $mode);
+		if ($milliwatts === false || !is_numeric($milliwatts))
+			return false;
+
+		return (float)$milliwatts / 1000;
 	}
 }
