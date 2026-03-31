@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import importlib.util
+import json
 import sys
 import time
 from dataclasses import dataclass
@@ -19,10 +19,9 @@ import requests
 CONFIG_KEYS = (
 	"rigctl_host",
 	"rigctl_port",
-	"wavelog_url",
-	"wavelog_api_key",
 	"radio_name",
 	"interval",
+	"wavelog_instances",
 )
 
 RECOVERABLE_ERRORS = {
@@ -32,15 +31,22 @@ RECOVERABLE_ERRORS = {
 	-Hamlib.RIG_EPOWER,
 }
 
+FORCE_SEND_INTERVAL = 60
+
+
+@dataclass(frozen=True)
+class WavelogInstance:
+	url: str
+	api_key: str
+
 
 @dataclass(frozen=True)
 class AppConfig:
 	rigctl_host: str
 	rigctl_port: int
-	wavelog_url: str
-	wavelog_api_key: str
 	radio_name: str
 	interval: int
+	wavelog_instances: list[WavelogInstance]
 
 
 @dataclass(frozen=True)
@@ -50,33 +56,54 @@ class RadioState:
 	power: int | float | str
 
 
-def load_python_config(path: Path) -> dict[str, Any]:
-	spec = importlib.util.spec_from_file_location("wavelog_config", path)
-	if spec is None or spec.loader is None:
-		raise RuntimeError(f"Could not load config from {path}")
+def eprint(*args, **kwargs) -> None:
+	print(*args, file=sys.stderr, **kwargs)
 
-	module = importlib.util.module_from_spec(spec)
-	spec.loader.exec_module(module)
 
-	values = {
-		key: getattr(module, key)
-		for key in CONFIG_KEYS
-		if hasattr(module, key)
-	}
+def load_json_config(path: Path) -> dict[str, Any]:
+	try:
+		with path.open("r", encoding="utf-8") as f:
+			values = json.load(f)
+	except json.JSONDecodeError as exc:
+		raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
 
-	legacy_mapping = {
-		"cloudlog_url": "wavelog_url",
-		"cloudlog_apikey": "wavelog_api_key",
-	}
-	for legacy_key, new_key in legacy_mapping.items():
-		if new_key not in values and hasattr(module, legacy_key):
-			values[new_key] = getattr(module, legacy_key)
+	if not isinstance(values, dict):
+		raise RuntimeError(f"Top-level JSON object in {path} must be an object")
 
 	missing = [key for key in CONFIG_KEYS if key not in values]
 	if missing:
 		raise RuntimeError(f"Missing config keys in {path}: {', '.join(missing)}")
 
 	return values
+
+
+def parse_wavelog_instances(raw_instances: Any) -> list[WavelogInstance]:
+	if not isinstance(raw_instances, list) or not raw_instances:
+		raise RuntimeError("wavelog_instances must be a non-empty list")
+
+	instances: list[WavelogInstance] = []
+
+	for index, item in enumerate(raw_instances):
+		if not isinstance(item, dict):
+			raise RuntimeError(f"wavelog_instances[{index}] must be an object")
+
+		url = item.get("url")
+		api_key = item.get("api_key")
+
+		if not isinstance(url, str) or not url.strip():
+			raise RuntimeError(f"wavelog_instances[{index}].url must be a non-empty string")
+
+		if not isinstance(api_key, str) or not api_key.strip():
+			raise RuntimeError(f"wavelog_instances[{index}].api_key must be a non-empty string")
+
+		instances.append(
+			WavelogInstance(
+				url=url.strip(),
+				api_key=api_key.strip(),
+			)
+		)
+
+	return instances
 
 
 def load_config(config_override: str | None = None) -> AppConfig:
@@ -86,27 +113,29 @@ def load_config(config_override: str | None = None) -> AppConfig:
 	if config_override is not None:
 		candidate_paths.append(Path(config_override).resolve())
 	else:
-		candidate_paths.append(base_dir / "config.py")
+		candidate_paths.append(base_dir / "config.json")
 
 	for path in candidate_paths:
 		if not path.exists():
 			continue
 
-		if path.suffix == ".py":
-			values = load_python_config(path)
-		else:
+		if path.suffix != ".json":
 			raise RuntimeError(f"Unsupported config format: {path}")
 
-		return AppConfig(
-			rigctl_host=str(values["rigctl_host"]),
-			rigctl_port=int(values["rigctl_port"]),
-			wavelog_url=str(values["wavelog_url"]),
-			wavelog_api_key=str(values["wavelog_api_key"]),
-			radio_name=str(values["radio_name"]),
-			interval=max(1, int(values["interval"])),
-		)
+		values = load_json_config(path)
 
-	raise RuntimeError("Missing config.py")
+		try:
+			return AppConfig(
+				rigctl_host=str(values["rigctl_host"]),
+				rigctl_port=int(values["rigctl_port"]),
+				radio_name=str(values["radio_name"]),
+				interval=max(1, int(values["interval"])),
+				wavelog_instances=parse_wavelog_instances(values["wavelog_instances"]),
+			)
+		except (TypeError, ValueError) as exc:
+			raise RuntimeError(f"Invalid config values in {path}: {exc}") from exc
+
+	raise RuntimeError("Missing config.json")
 
 
 class HamlibRigClient:
@@ -193,7 +222,7 @@ class HamlibRigClient:
 
 	@staticmethod
 	def _normalize_frequency(frequency_hz: float) -> int:
-		return (int(frequency_hz) // 100) * 100
+		return (int(frequency_hz) // 10) * 10
 
 	@staticmethod
 	def _normalize_power(power_watts: float | None) -> int | float | str:
@@ -262,20 +291,26 @@ class HamlibRigClient:
 		)
 
 
-def post_info_to_wavelog(session: requests.Session, url: str, data: dict[str, Any]) -> bool:
-	endpoint = url.rstrip("/") + "/api/radio"
+def post_info_to_wavelog(
+	session: requests.Session,
+	instance: WavelogInstance,
+	data: dict[str, Any],
+) -> bool:
+	endpoint = instance.url.rstrip("/") + "/api/radio"
+	payload = dict(data)
+	payload["key"] = instance.api_key
 
 	try:
-		response = session.post(endpoint, json=data, timeout=10)
+		response = session.post(endpoint, json=payload, timeout=10)
 	except requests.RequestException as exc:
-		print(f"Wavelog POST error: request failed: {exc}")
+		eprint(f"Wavelog POST error for {instance.url}: request failed: {exc}")
 		return False
 
 	if response.status_code >= 400:
-		message = f"Wavelog POST error: HTTP {response.status_code} returned by server."
+		message = f"Wavelog POST error for {instance.url}: HTTP {response.status_code} returned by server."
 		if response.text:
 			message += f" Response: {response.text}"
-		print(message)
+		eprint(message)
 		return False
 
 	return True
@@ -287,52 +322,65 @@ def build_payload(config: AppConfig, state: RadioState) -> dict[str, Any]:
 		"frequency": state.frequency,
 		"mode": state.mode,
 		"power": state.power,
-		"key": config.wavelog_api_key,
 	}
 
 
 def run(config: AppConfig, *, dry_run: bool = False, once: bool = False) -> int:
 	rig_client = HamlibRigClient(config.rigctl_host, config.rigctl_port)
 	session = requests.Session()
-	last_sent: tuple[int, str, int | float | str] | None = None
+	last_sent_state: tuple[int, str, int | float | str] | None = None
+	last_sent_at = 0.0
 	radio_data_unavailable = False
 	next_poll_at = time.monotonic()
 
 	try:
 		while True:
 			state = rig_client.read_state()
+			now = time.monotonic()
 
 			if state is None:
 				if not radio_data_unavailable:
 					message = "Radio data unavailable. Skipping Wavelog update."
 					if rig_client.last_error_status < 0:
 						message += f" Hamlib: {rig_client.error_message()}"
-					print(message)
+					eprint(message)
 					radio_data_unavailable = True
-					last_sent = None
+					last_sent_state = None
+					last_sent_at = 0.0
 
 				if once:
 					return 1
 			else:
 				if radio_data_unavailable:
-					print("Radio data available again. Resuming Wavelog updates.")
+					eprint("Radio data available again. Resuming Wavelog updates.")
 					radio_data_unavailable = False
 
 				payload = build_payload(config, state)
 				current_state = (state.frequency, state.mode, state.power)
 
-				if current_state != last_sent:
+				state_changed = current_state != last_sent_state
+				force_send_due = (now - last_sent_at) >= FORCE_SEND_INTERVAL
+				should_send = state_changed or force_send_due or last_sent_state is None
+
+				if should_send:
 					if dry_run:
-						print(f"Dry run payload: {payload}")
-						last_sent = current_state
+						eprint(f"Dry run payload: {payload}")
+						last_sent_state = current_state
+						last_sent_at = now
 					else:
-						if post_info_to_wavelog(session, config.wavelog_url, payload):
-							last_sent = current_state
-							print(
+						all_ok = True
+						for instance in config.wavelog_instances:
+							if not post_info_to_wavelog(session, instance, payload):
+								all_ok = False
+
+						if all_ok:
+							last_sent_state = current_state
+							last_sent_at = now
+							eprint(
 								f"Updated info. Frequency: {state.frequency} - Mode: {state.mode} - Power: {state.power}"
 							)
 						else:
-							print(
+							eprint(
 								f"Failed to update info. Frequency: {state.frequency} - Mode: {state.mode} - Power: {state.power}"
 							)
 
@@ -344,7 +392,7 @@ def run(config: AppConfig, *, dry_run: bool = False, once: bool = False) -> int:
 			if sleep_for > 0:
 				time.sleep(sleep_for)
 	except KeyboardInterrupt:
-		print("Stopping.")
+		eprint("Stopping.")
 		return 0
 	finally:
 		session.close()
@@ -353,7 +401,7 @@ def run(config: AppConfig, *, dry_run: bool = False, once: bool = False) -> int:
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Wavelog-Hamlib interface using Python and Hamlib")
-	parser.add_argument("--config", help="Path to config.py")
+	parser.add_argument("--config", help="Path to config.json")
 	parser.add_argument("--dry-run", action="store_true", help="Read rig data and print payload without POSTing to Wavelog")
 	parser.add_argument("--once", action="store_true", help="Read one iteration and exit")
 	return parser.parse_args()
@@ -365,7 +413,7 @@ def main() -> int:
 	try:
 		config = load_config(args.config)
 	except Exception as exc:
-		print(f"Configuration error: {exc}")
+		eprint(f"Configuration error: {exc}")
 		return 1
 
 	return run(config, dry_run=args.dry_run, once=args.once)
