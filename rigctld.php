@@ -59,7 +59,7 @@ class rigctldAPI
 		if (!is_numeric($frequency))
 			return $frequency;
 
-		return (string)(intdiv((int)$frequency, 100) * 100);
+		return (string)(intdiv((int)$frequency, 10) * 10);
 	}
 
 	public function getFrequencyAndMode()
