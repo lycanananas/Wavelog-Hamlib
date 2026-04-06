@@ -2,7 +2,6 @@
   "rigctl_host": "127.0.0.1",
   "rigctl_port": 4532,
   "radio_name": "IC-7300",
-  "interval": 5,
   "wavelog_instances": [
     {
       "url": "https://wavelog1.example.com",

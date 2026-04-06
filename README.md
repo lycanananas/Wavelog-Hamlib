@@ -2,6 +2,10 @@
 Connects Wavelog to `rigctld` via Python 3 and the system Hamlib bindings.
 This updates the used frequency, mode and configured TX power in Wavelog's Live QSO view.
 
+The bridge opens a fresh Hamlib connection for every poll cycle. If `rig_open()`, radio state
+readout, or the Wavelog update fails, it waits 5 seconds and retries the loop. After a fully
+successful cycle it closes the connection and starts the next cycle 1 second later.
+
 ## Requirements
 
 Use system packages only.
@@ -22,24 +26,22 @@ The Python bindings are provided by the `hamlib` package itself.
 
 ## Configuration
 
-The Python entrypoint reads `config.py`.
+The Python entrypoint reads `config.json`.
 
-Example `config.py`:
+Example `config.json`:
 
-```python
-# rigctl-specific configuration
-rigctl_host = "127.0.0.1"
-rigctl_port = 4532
-
-# Wavelog-specific parameters
-wavelog_url = "https://example.wavelog.com/"
-wavelog_api_key = "2137-1234-5678-9012-345678901234"
-
-# displayed in Wavelog's Live QSO menu
-radio_name = "FT-991a"
-
-# poll interval in seconds
-interval = 1
+```json
+{
+	"rigctl_host": "127.0.0.1",
+	"rigctl_port": 4532,
+	"radio_name": "FT-991A",
+	"wavelog_instances": [
+		{
+			"url": "https://example.wavelog.com",
+			"api_key": "2137-1234-5678-9012-345678901234"
+		}
+	]
+}
 ```
 
 ## Running
@@ -50,10 +52,10 @@ Start the software by running:
 python rigctl_cloudlog_interface.py
 ```
 
-Dry-run one iteration without POSTing to Wavelog:
+Dry-run without sending to Wavelog:
 
 ```bash
-python rigctl_cloudlog_interface.py --once --dry-run
+python rigctl_cloudlog_interface.py --dry-run
 ```
 
 ## systemd
